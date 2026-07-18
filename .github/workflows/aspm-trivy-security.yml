@@ -1,0 +1,100 @@
+name: ASPM Trivy Security Scan
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  trivy-repo-scan:
+    name: Trivy filesystem scan - vuln, secret, IaC
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget
+          wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      - name: Run Trivy filesystem scan as SARIF
+        run: |
+          trivy fs . \
+            --scanners vuln,secret,config \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format sarif \
+            --output trivy-repo-results.sarif \
+            --exit-code 0
+
+      - name: Upload Trivy repo SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-repo-results.sarif
+          category: trivy-repo-scan
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          trivy fs . \
+            --format cyclonedx \
+            --output trivy-sbom.cdx.json \
+            --exit-code 0
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sbom-cyclonedx
+          path: trivy-sbom.cdx.json
+
+  trivy-container-scan:
+    name: Trivy container image scan
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Check Dockerfile
+        id: dockerfile_check
+        run: |
+          if [ -f Dockerfile ]; then
+            echo "dockerfile_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "dockerfile_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Docker image
+        if: steps.dockerfile_check.outputs.dockerfile_exists == 'true'
+        run: |
+          docker build -t aspm-test-image:${{ github.sha }} .
+
+      - name: Install Trivy
+        if: steps.dockerfile_check.outputs.dockerfile_exists == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget
+          wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      - name: Scan Docker image as SARIF
+        if: steps.dockerfile_check.outputs.dockerfile_exists == 'true'
+        run: |
+          trivy image aspm-test-image:${{ github.sha }} \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            --format sarif \
+            --output trivy-container-results.sarif \
+            --exit-code 0
+
+      - name: Upload container SARIF
+        if: steps.dockerfile_check.outputs.dockerfile_exists == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-container-results.sarif
+          category: trivy-container-scan
